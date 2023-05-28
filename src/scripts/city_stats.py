@@ -1,3 +1,5 @@
+
+import os
 os.environ['HADOOP_CONF_DIR'] = '/etc/hadoop/conf'
 os.environ['YARN_CONF_DIR'] = '/etc/hadoop/conf'
 
@@ -36,7 +38,7 @@ def month_input_paths(base_input_path:str, date_from: dt) -> List[str]:
     for d in range(depth):
         current_date = (date_from + timedelta(days=d)).isoformat()
         paths.append(f"{base_input_path}/date={current_date}/")
-        
+
     return paths
 
 def week_input_paths(base_input_path:str, date_from: dt) -> List[str]:
@@ -44,49 +46,61 @@ def week_input_paths(base_input_path:str, date_from: dt) -> List[str]:
     for d in range(7):
         current_date = (date_from + timedelta(days=d)).isoformat()
         paths.append(f"{base_input_path}/date={current_date}/")
-        
+
     return paths
-    
-def subs_count(spark: SparkSession, df_city: DataFrame, paths: List[str], timerange: str) -> DataFrame:
 
-    return spark.read.parquet(*paths) \
-                .where("event_type = 'subscription' and event.subscription_user is not null and event.subscription_channel is not null") \
-                .selectExpr(["event.subscription_user as user_id", "lat", "lon"]) \
-                .transform (lambda df: city_of_the_event(df_city, df)) \
-                .groupBy("zone_id").agg(F.expr(f"count(user_id) as {timerange}_subscription "))
+def subs_count(spark: SparkSession, df_city: DataFrame, month_paths: List[str], week_paths: List[str]) -> DataFrame:
 
-def messages_count(spark: SparkSession, df_city: DataFrame, paths: List[str], timerange: str) -> DataFrame:
+    df_month = spark.read.parquet(*month_paths) \
+                      .where("event_type = 'subscription' and event.subscription_user is not null and event.subscription_channel is not null") \
+                      .selectExpr(["event.subscription_user as user_id", "lat", "lon"]) \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as month_subscription "))
 
-    return spark.read.parquet(*paths) \
-                .where("event_type = 'message' and event.message_from is not null and event.message_to is not null") \
-                .selectExpr(["event.message_from as user_id", "lat", "lon"]) \
-                .transform (lambda df: city_of_the_event(df_city, df)) \
-                .groupBy("zone_id").agg(F.expr(f"count(user_id) as {timerange}_message"))
+    df_week = spark.read.parquet(*week_paths) \
+                      .where("event_type = 'subscription' and event.subscription_user is not null and event.subscription_channel is not null") \
+                      .selectExpr(["event.subscription_user as user_id", "lat", "lon"]) \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as week_subscription "))
 
-def reactions_count(spark: SparkSession, df_city: DataFrame, paths: List[str], timerange: str) -> DataFrame:
+    return df_month.join(df_week, "zone_id", "full-outer")
 
-    df_month = spark.read.parquet(*paths) \
+def messages_count(spark: SparkSession, df_city: DataFrame, month_paths: List[str], week_paths: List[str]) -> DataFrame:
+
+    df_month = spark.read.parquet(*month_paths) \
+                      .where("event_type = 'message' and event.message_from is not null and event.message_to is not null") \
+                      .selectExpr(["event.message_from as user_id", "lat", "lon"]) \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as month_message"))
+
+    df_week = spark.read.parquet(*week_paths) \
+                      .where("event_type = 'message' and event.message_from is not null and event.message_to is not null") \
+                      .selectExpr(["event.message_from as user_id", "lat", "lon"]) \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as week_message"))
+
+    return df_month.join(df_week, "zone_id", "full-outer")
+
+def reactions_count(spark: SparkSession, df_city: DataFrame, month_paths: List[str], week_paths: List[str]) -> DataFrame:
+
+    df_month = spark.read.parquet(*month_paths) \
                       .where("event_type = 'reaction' and event.reaction_from is not null") \
                       .selectExpr(["event.reaction_from as user_id", "lat", "lon"]) \
                       .transform (lambda df: city_of_the_event(df_city, df)) \
-                      .groupBy("zone_id").agg(F.expr(f"count(user_id) as {timerange}_reaction"))
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as month_reaction"))
 
-def month_registrations_count(spark: SparkSession, df_city: DataFrame, events_base_path: str, month_date: dt) -> DataFrame:
+    df_week = spark.read.parquet(*week_paths) \
+                      .where("event_type = 'reaction' and event.reaction_from is not null") \
+                      .selectExpr(["event.message_from as user_id", "lat", "lon"]) \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as week_reaction "))
+
+    return df_month.join(df_week, "zone_id", "full-outer")
+
+def registrations_count(spark: SparkSession, df_city: DataFrame, events_base_path: str, month_date: dt, week_date: dt) -> DataFrame:
 
     month_date_from = month_date.isoformat()
     month_date_to = month_date.replace(month=month_date.month + 1).isoformat()
-
-    window_first = Window().partitionBy("user_id").orderBy(F.col("message_ts").asc())
-
-    return spark.read.parquet(events_base_path) \
-                .where(f"date < {month_date_to} and event_type = 'message' and event.message_from is not null and event.message_to is not null") \
-                .selectExpr(["event.message_from as user_id", "event.message_id as message_id", "event.message_ts as message_ts", "lat", "lon"]) \
-                .withColumn("first_msg", F.first("message_id").over(window_first)) \
-                .where(f"first_msg = message_id and message_ts >= {month_date_from}") \
-                .transform (lambda df: city_of_the_event(df_city, df)) \
-                .groupBy("zone_id").agg(F.expr("count(user_id) as month_message"))
-
-def week_registrations_count(spark: SparkSession, df_city: DataFrame, events_base_path: str, week_date: dt) -> DataFrame:
 
     week_date_from = week_date.isoformat()
     week_date_dict = week_date.isocalendar()
@@ -94,14 +108,24 @@ def week_registrations_count(spark: SparkSession, df_city: DataFrame, events_bas
     week_date_to = dt.fromisocalendar(week_date_dict["year"], week_date_dict["week"], week_date_dict["day"]).isoformat()
 
     window_first = Window().partitionBy("user_id").orderBy(F.col("message_ts").asc())
-                      
-    return spark.read.parquet(events_base_path) \
-                .where(f"date < {week_date_to} and event_type = 'message' and event.message_from is not null and event.message_to is not null") \
-                .selectExpr(["event.message_from as user_id", "event.message_id as message_id", "event.message_ts as message_ts", "lat", "lon"]) \
-                .withColumn("first_msg", F.first("message_id").over(window_first)) \
-                .where(f"first_msg = message_id and message_ts >= {week_date_from}") \
-                .transform (lambda df: city_of_the_event(df_city, df)) \
-                .groupBy("zone_id").agg(F.expr("count(user_id) as month_message"))
+
+    df_month = spark.read.parquet(events_base_path) \
+                      .where(f"date < {month_date_to} and event_type = 'message' and event.message_from is not null and event.message_to is not null") \
+                      .selectExpr(["event.message_from as user_id", "event.message_id as message_id", "event.message_ts as message_ts", "lat", "lon"]) \
+                      .withColumn("first_msg", F.first("message_id").over(window_first)) \
+                      .where(f"first_msg = message_id and message_ts >= {month_date_from}") \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as month_message"))
+
+    df_week = spark.read.parquet(events_base_path) \
+                      .where(f"date < {week_date_to} and event_type = 'message' and event.message_from is not null and event.message_to is not null") \
+                      .selectExpr(["event.message_from as user_id", "event.message_id as message_id", "event.message_ts as message_ts", "lat", "lon"]) \
+                      .withColumn("first_msg", F.first("message_id").over(window_first)) \
+                      .where(f"first_msg = message_id and message_ts >= {week_date_from}") \
+                      .transform (lambda df: city_of_the_event(df_city, df)) \
+                      .groupBy("zone_id").agg(F.expr("count(user_id) as month_message"))
+
+    return df_month.join(df_week, "zone_id", "full-outer")
 
 
 
@@ -112,41 +136,33 @@ def __main__():
     events_base_path = sys.argv[3]
     city_base_path = sys.argv[4]
     output_base_path = sys.argv[5]
-    
+
     spark = SparkSession \
             .builder \
             .master("yarn") \
             .appName("City stats job") \
             .getOrCreate()
-    
+
     year =  dt.today().year
     month_date_from = dt(year, int(month), 1)
     week_date_from = dt.fromisocalendar(year, int(week), 1)
-    
+
     month_paths = month_input_paths(events_base_path, month_date_from)
     week_paths = week_input_paths(events_base_path, week_date_from)
 
     df_city = spark.read.parquet(city_base_path)
 
-    df_month_stats = messages_count(spark, df_city, month_paths, "month") \
-            .join(reactions_count(spark, df_city, month_paths, "month"), "zone_id", "full-outer") \
-            .join(subs_count(spark, df_city, month_paths, "month"), "zone_id", "full-outer") \
-            .join(week_registrations_count(spark, df_city, events_base_path, month_date_from), "zone_id", "full-outer") \
+    df_city_stats = messages_count(spark, df_city, month_paths, week_paths) \
+            .join(reactions_count(spark, df_city, month_paths, week_paths), "zone_id", "full-outer") \
+            .join(subs_count(spark, df_city, month_paths, week_paths), "zone_id", "full-outer") \
+            .join(registrations_count(spark, df_city, events_base_path, month_date_from, week_date_from), "zone_id", "full-outer") \
             .withColumn("month", F.lit(month)) \
             .withColumn("week", F.lit(week))
-    
-    df_week_stats = messages_count(spark, df_city, week_paths, "week") \
-            .join(reactions_count(spark, df_city, week_paths, "week"), "zone_id", "full-outer") \
-            .join(subs_count(spark, df_city, week_paths, "week"), "zone_id", "full-outer") \
-            .join(week_registrations_count(spark, df_city, events_base_path, week_date_from), "zone_id", "full-outer") \
-            .withColumn("month", F.lit(month)) \
-            .withColumn("week", F.lit(week))
-    
-    df_month_stats.write.format('parquet').mode("overwrite").save(f"{output_base_path}/month={month}")
-    df_week_stats.write.format('parquet').mode("overwrite").save(f"{output_base_path}/week={week}")
+
+    df_city_stats.write.partitionBy([month, week]).mode("overwrite").format("parquet").save(output_base_path)
 
     spark.stop()
 
 
 if __name__ == "__main__":
-    __main__()  
+
