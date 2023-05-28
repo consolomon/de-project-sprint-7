@@ -78,3 +78,5 @@ spark_city_stats = SparkSubmitOperator(
                         executor_cores = 2,
                         executor_memory = '4g',
                         )
+
+spark_user_address >> spark_friend_offers >> spark_city_stats
