@@ -24,13 +24,13 @@ def user_groups(df_subs: DataFrame) -> DataFrame:
     return df_subs.selectExpr(["event.subscription_user as user_id", "event.subscription_channel as channel_id"]) \
                   .where("user_id is not null and channel_id is not null").distinct()
 
-def disconnected_users(df_message: DataFrame) -> DataFrame:
+def disconnected_users(df_message: DataFrame, df_subs: DataFrame) -> DataFrame:
 
     df_contacts = df_message.select("from", "to").distinct()
 
-    df_users = df_contacts.union(df_contacts.select("to", "from")) \
-                          .withColumnRenamed("from", "user_id") \
-                          .withColumnRenamed("to", "co_user_id").distinct()
+    df_users = df_subs.select("user_id").distinct() \
+                      .withColumn("user_list", F.collect_list("user_id")) \
+                      .selectExpr(["*", "explode(user_list) as co_user_id"]).distinct() \
     
     return df_users.join(df_contacts, [df_contacts['from'] == df_users['user_id'], df_contacts['to'] == df_users['co_user_id']], "left_anti")
 
@@ -88,7 +88,7 @@ def __main__():
                   .selectExpr(["event.message_from as from", "event.message_to as to",
         "event.message_ts as message_ts", "lat as phi_user", "lon as lam_user"])
 
-    df_offers = disconnected_users(df_message)
+    df_offers = disconnected_users(df_message, df_subs)
 
     df_users_with_geo = users_with_last_geo(df_message)
 
