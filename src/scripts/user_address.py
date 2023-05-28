@@ -24,7 +24,7 @@ def user_address(df_event: DataFrame, df_city: DataFrame, date: str, depth: int)
     from_date = (dt.fromisoformat(date) - timedelta(days=depth)).isoformat()
 
     actual_window = Window().partitionBy("user_id").orderBy(F.col("message_ts").desc())
-    home_city_window = Window().partitionBy("user_id").orderBy(F.col("count").desc())
+    home_city_window = Window().partitionBy("user_id").orderBy(F.col("days_count").desc())
 
     df_event_city = df_event.where(f"date >= '{from_date}' and date <= '{date}'") \
                             .transform(lambda df_event: city_of_the_event(df_city, df_event))
@@ -32,18 +32,22 @@ def user_address(df_event: DataFrame, df_city: DataFrame, date: str, depth: int)
     df_travel = df_event_city.withColumn("city_lag", F.lag("city_name").over(actual_window)) \
                              .select("user_id", "city_name", "city_lag").where ("city_name != city_lag") \
                              .groupBy("user_id").agg(
-                                 F.expr("collect_list(city_name) as travel_array"),
-                                 F.expr("count(city_name) as travel_count"))
+                                 F.expr("count(city_name) as travel_count"),
+                                 F.expr("collect_list(city_name) as travel_array")
+                             )
     
     return df_event_city.withColumn("act_city", F.first("city_name").over(actual_window)) \
                         .withColumn("act_time", F.first("message_ts").over(actual_window)) \
                         .withColumn("act_timezone", F.first("timezone_name").over(actual_window)) \
-                        .groupBy("user_id", "city_name", "act_city", "act_timezone", "act_time").agg(F.expr("count(message_id) as count")) \
+                        .withColumn("prev_city", F.lead("city_name").over(actual_window)) \
+                        .withColumn("prev_ts", F.lead("message_ts").over(actual_window)) \
+                        .where("prev_city != city_name") \
+                        .withColumn("days_count", F.datediff(F.col("message_ts"), F.col("prev_ts"))) \
                         .withColumn("local_time", F.from_utc_timestamp(
                                 F.col("act_time"),F.col("act_timezone")
                         )) \
                         .withColumn("home_city", F.first("city_name").over(home_city_window)) \
-                        .drop("city_name", "act_timezone", "count").distinct() \
+                        .select("user_id", "act_city", "home_city", "local_time").distinct() \
                         .join(df_travel, "user_id")
 
 def __main__():
